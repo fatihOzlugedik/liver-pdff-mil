@@ -1,0 +1,6 @@
+runs/
+runs_with_test/
+runs_without_test/
+**/__pycache__/
+*.pyc
+

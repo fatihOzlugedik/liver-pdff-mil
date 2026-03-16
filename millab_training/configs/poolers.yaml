@@ -1,0 +1,17 @@
+experiments:
+
+# ─────────────────────────────────────────────────────────────────
+# MIL-Lab Models — Attention-based aggregation for PDFF regression
+# ─────────────────────────────────────────────────────────────────
+
+ - name: abmil
+   aggregator: abmil
+
+ - name: transmil
+   aggregator: transmil
+
+ - name: clamsb
+   aggregator: clamsb
+
+ - name: dsmil
+   aggregator: dsmil

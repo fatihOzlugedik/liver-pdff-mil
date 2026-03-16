@@ -1,0 +1,106 @@
+experiments:
+
+# # ─────────────────────────────────────────────────────────────────
+# # GROUP 1: Naive Pooling Baselines (Table 2 — weakest performers)
+# # ─────────────────────────────────────────────────────────────────
+ - name: mean
+   aggregator: mean
+
+ - name: max
+   aggregator: max
+#
+# # ─────────────────────────────────────────────────────────────────
+# # GROUP 1b: ABMIL (MIL-Lab) — patch embed MLP + gated attention
+# # ─────────────────────────────────────────────────────────────────
+ - name: abmil              # gated ABMIL, embed_dim=512, attn_dim=384
+   aggregator: abmil
+#
+# - name: abmil_nogate       # non-gated ABMIL variant
+#   aggregator: abmil_nogate
+#
+# # ─────────────────────────────────────────────────────────────────
+# # GROUP 2: Additive Attention (single- and multi-head)
+# # ─────────────────────────────────────────────────────────────────
+# - name: attention          # single-head additive attention (Ilse et al.)
+#   aggregator: attention
+#
+# - name: transf4            # multi-head additive attention, 4 heads
+#   aggregator: transf4
+#
+# - name: transf8            # multi-head additive attention, 8 heads
+#   aggregator: transf8
+#
+# # ─────────────────────────────────────────────────────────────────
+# # GROUP 3: Gated Attention — ablation across head counts
+# #   (Section 4.1: single-head gated → multi-head gated progression)
+# # ─────────────────────────────────────────────────────────────────
+# - name: gated              # single-head gated attention (k=1)
+#   aggregator: gated
+#
+# - name: mh_gated4          # proposed multi-head gated, 4 heads
+#   aggregator: mh_gated4
+#
+# - name: mh_gated8          # proposed multi-head gated, 8 heads
+#   aggregator: mh_gated8
+#
+# - name: mh_gated16         # proposed multi-head gated, 16 heads
+#   aggregator: mh_gated16
+#
+# # ─────────────────────────────────────────────────────────────────
+# # GROUP 4a: Temporal variants of orderless baselines
+# #   Fair comparison: same pooler + temporal context on top.
+# #   abmil_tpeg = ABMIL + TPEG (tests: does temporal PE help ABMIL?)
+# #   tconv32h4  = tconv + mh_gated4 (tests: does tconv help mh_gated4?)
+# # ─────────────────────────────────────────────────────────────────
+# - name: abmil_tpeg            # ABMIL + temporal positional encoding
+#   aggregator: abmil_tpeg
+#
+ - name: tconv32_gated4        # temporal conv (k=32) + mh_gated4 (matched heads)
+   aggregator: temporal_conv32h4
+#
+# # ─────────────────────────────────────────────────────────────────
+# # GROUP 4b: Temporal Convolution + Multi-Head Gated Attention
+# #   (additional configurations)
+# # ─────────────────────────────────────────────────────────────────
+# - name: tconv16_gated4
+#   aggregator: temporal_conv16h4
+#
+# - name: tconv32_gated8
+#   aggregator: temporal_conv32h8
+#
+# - name: tconv64_gated8
+#   aggregator: temporal_conv64h8
+#
+# # ─────────────────────────────────────────────────────────────────
+# # GROUP 5: TransMIL-1D variants — architectural depth/head ablation
+# #   (lightweight → heavy, ordered by complexity)
+# # ─────────────────────────────────────────────────────────────────
+# - name: tmil1d_light           # 4 heads, 2 layers, window=64
+#   aggregator: transmil1d4_2_w64
+#
+# - name: tmil1d_shallow         # 8 heads, 2 layers, window=64
+#   aggregator: transmil1d8_2_w64
+#
+# - name: tmil1d_w32             # 8 heads, 3 layers, window=32
+#   aggregator: transmil1d8_3_w32
+#
+# - name: tmil1d_w64             # 8 heads, 3 layers, window=64
+#   aggregator: transmil1d8_3_w64
+#
+# - name: tmil1d_more_heads      # 12 heads, 4 layers, window=96
+#   aggregator: transmil1d12_4_w96
+#
+# - name: tmil1d_more_depth      # 8 heads, 6 layers, window=64
+#   aggregator: transmil1d8_6_w64
+#
+# - name: tmil1d_global_no_tpeg  # 8 heads, 3 layers, global attn, no TPEG
+#   aggregator: transmil1d8_3_notpeg
+#
+# - name: tmil1d_base_global     # 8 heads, 3 layers, global attn (no window)
+#   aggregator: transmil1d8_3
+#
+# # ─────────────────────────────────────────────────────────────────
+# # GROUP 6: GRU Pooling (temporal recurrence baseline)
+# # ─────────────────────────────────────────────────────────────────
+# - name: gru
+#   aggregator: gru
