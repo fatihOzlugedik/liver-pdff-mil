@@ -1,5 +1,5 @@
-# model.py — Drop-in MIL with TransMIL-Temporal for video (~700 frames), no chunking
-import re, math, torch, timm
+# model.py — MIL model with multiple pooling strategies for video regression
+import re, torch, timm
 import torch.nn as nn
 from config import CFG
 
@@ -17,6 +17,7 @@ class AttentionMIL(nn.Module):
     def __init__(self, dim, hidden=128):
         super().__init__()
         self.att = nn.Sequential(
+            
             nn.Linear(dim, hidden), nn.Tanh(), nn.Linear(hidden, 1)
         )
     def forward(self, x):                      # x: (inst, D)
@@ -74,10 +75,8 @@ class ABMILPool(nn.Module):
     Architecture (Ilse et al., ICML 2018):
       1. patch_embed MLP: maps each instance D → embed_dim (nonlinear projection
          with ReLU + dropout, giving the attention mechanism a learned subspace).
-      2. Gated attention (default) or standard additive attention:
-         - Gated: Tanh(Wh) ⊙ Sigmoid(Uh) → linear → scalar score per instance.
-           The sigmoid gate controls information flow, suppressing noisy instances.
-         - Non-gated: Tanh(Wh) → linear → scalar score per instance.
+      2. Gated attention: Tanh(Wh) ⊙ Sigmoid(Uh) → linear → scalar score per instance.
+         The sigmoid gate controls information flow, suppressing noisy instances.
       3. Softmax over instances → weighted sum → bag-level feature (embed_dim).
       4. proj_back: linear embed_dim → D to match the regressor input dimension.
 
@@ -85,15 +84,13 @@ class ABMILPool(nn.Module):
       - Adds a patch_embed MLP before attention (learnable subspace projection).
       - Adds dropout inside both the MLP and the attention branches.
       - Uses Kaiming initialization (important for deeper attention networks).
-      - Supports both gated and non-gated variants via the 'gate' flag.
 
     Reference:
       Ilse, Tomczak & Welling, "Attention-based Deep Multiple Instance Learning",
-      ICML 2018.  MIL-Lab implementation: src/MIL-Lab/src/models/abmil.py
+      ICML 2018.
     """
-    def __init__(self, dim, embed_dim=512, attn_dim=384, dropout=0.25, gate=True):
+    def __init__(self, dim, embed_dim=512, attn_dim=384, dropout=0.25):
         super().__init__()
-        self.gate = gate
 
         # Patch embedding: nonlinear projection of each instance feature
         self.patch_embed = nn.Sequential(
@@ -102,22 +99,14 @@ class ABMILPool(nn.Module):
             nn.Dropout(dropout),
         )
 
-        # Attention mechanism
-        if gate:
-            # Gated: Tanh path ⊙ Sigmoid path → linear → score
-            self.attn_a = nn.Sequential(
-                nn.Linear(embed_dim, attn_dim), nn.Tanh(), nn.Dropout(dropout)
-            )
-            self.attn_b = nn.Sequential(
-                nn.Linear(embed_dim, attn_dim), nn.Sigmoid(), nn.Dropout(dropout)
-            )
-            self.attn_c = nn.Linear(attn_dim, 1)
-        else:
-            # Non-gated: Tanh → linear → score
-            self.attn = nn.Sequential(
-                nn.Linear(embed_dim, attn_dim), nn.Tanh(),
-                nn.Dropout(dropout), nn.Linear(attn_dim, 1),
-            )
+        # Gated attention: Tanh path ⊙ Sigmoid path → linear → score
+        self.attn_a = nn.Sequential(
+            nn.Linear(embed_dim, attn_dim), nn.Tanh(), nn.Dropout(dropout)
+        )
+        self.attn_b = nn.Sequential(
+            nn.Linear(embed_dim, attn_dim), nn.Sigmoid(), nn.Dropout(dropout)
+        )
+        self.attn_c = nn.Linear(attn_dim, 1)
 
         # Project back to original dim so the regressor interface is unchanged
         self.proj_back = nn.Linear(embed_dim, dim)
@@ -132,295 +121,51 @@ class ABMILPool(nn.Module):
 
     def forward(self, x):                          # x: (inst, D)
         h = self.patch_embed(x)                    # (inst, embed_dim)
-        if self.gate:
-            A = self.attn_a(h) * self.attn_b(h)   # (inst, attn_dim)
-            A = self.attn_c(A)                     # (inst, 1)
-        else:
-            A = self.attn(h)                       # (inst, 1)
+        A = self.attn_a(h) * self.attn_b(h)        # (inst, attn_dim)
+        A = self.attn_c(A)                         # (inst, 1)
         A = torch.softmax(A, dim=0)                # normalize over instances
         pooled = (A * h).sum(0)                    # (embed_dim,)
         return self.proj_back(pooled)              # (D,)
 
-
-class TemporalABMILPool(nn.Module):
-    """
-    Temporal ABMIL — ABMIL with temporal positional encoding (TPEG).
-
-    Injects multi-scale temporal context (via TPEG) into frame features
-    BEFORE the ABMIL attention mechanism. This lets the gated attention
-    know *where* in the video each frame comes from, so it can learn
-    temporally-dependent importance patterns (e.g. "mid-sweep frames
-    are more diagnostic").
-
-    Architecture:
-      1. TPEG: residual multi-scale 1-D depthwise conv (k=3,5,7) → fuse → D.
-         Adds temporal position info to each frame's feature vector.
-      2. patch_embed MLP: D → embed_dim (same as standard ABMIL).
-      3. Gated attention → softmax → weighted sum (same as standard ABMIL).
-      4. proj_back: embed_dim → D.
-
-    This is the temporal counterpart of ABMILPool — identical except for
-    the TPEG injection. Comparing abmil vs tabmil isolates the effect of
-    temporal position information on attention-based frame weighting.
-    """
-    def __init__(self, dim, embed_dim=512, attn_dim=384, dropout=0.25, gate=True):
-        super().__init__()
-        self.gate = gate
-
-        # Temporal positional encoding (residual, applied to raw features)
-        self.tpeg = TPEG(dim)
-
-        # Patch embedding: nonlinear projection of each instance feature
-        self.patch_embed = nn.Sequential(
-            nn.Linear(dim, embed_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-        )
-
-        # Attention mechanism (identical to ABMILPool)
-        if gate:
-            self.attn_a = nn.Sequential(
-                nn.Linear(embed_dim, attn_dim), nn.Tanh(), nn.Dropout(dropout)
-            )
-            self.attn_b = nn.Sequential(
-                nn.Linear(embed_dim, attn_dim), nn.Sigmoid(), nn.Dropout(dropout)
-            )
-            self.attn_c = nn.Linear(attn_dim, 1)
-        else:
-            self.attn = nn.Sequential(
-                nn.Linear(embed_dim, attn_dim), nn.Tanh(),
-                nn.Dropout(dropout), nn.Linear(attn_dim, 1),
-            )
-
-        self.proj_back = nn.Linear(embed_dim, dim)
-        self._init_weights()
-
-    def _init_weights(self):
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.kaiming_uniform_(m.weight, nonlinearity='relu')
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
-
-    def forward(self, x):                          # x: (inst, D)
-        x = x + self.tpeg(x)                      # residual temporal PE
-        h = self.patch_embed(x)                    # (inst, embed_dim)
-        if self.gate:
-            A = self.attn_a(h) * self.attn_b(h)   # (inst, attn_dim)
-            A = self.attn_c(A)                     # (inst, 1)
-        else:
-            A = self.attn(h)                       # (inst, 1)
-        A = torch.softmax(A, dim=0)                # normalize over instances
-        pooled = (A * h).sum(0)                    # (embed_dim,)
-        return self.proj_back(pooled)              # (D,)
-
-
-class GRUPool(nn.Module):
-    def __init__(self, dim, hidden=256):
-        super().__init__()
-        self.gru = nn.GRU(dim, hidden, batch_first=True)
-        self.proj= nn.Linear(hidden, dim)
-    def forward(self, x):              # (inst,D)
-        _, h = self.gru(x.unsqueeze(0))
-        return self.proj(h.squeeze(0))
-
-class TinyTransformerPool(nn.Module):
-    """Single Transformer encoder block, then mean."""
-    def __init__(self, dim, heads=4, ff=512):
-        super().__init__()
-        self.enc = nn.TransformerEncoderLayer(dim, heads, ff, batch_first=True)
-    def forward(self, x):
-        return self.enc(x.unsqueeze(0)).mean(1).squeeze(0)
-
-# ----------------------- TransMIL (2-D grid) components ----------------
-# Kept for completeness (not used for videos).
-class PPEG(nn.Module):
-    """Pyramid Positional Encoding Generator (2-D, depthwise 3/5/7)."""
-    def __init__(self, dim: int):
-        super().__init__()
-        self.conv3 = nn.Conv2d(dim, dim, kernel_size=3, padding=1, groups=dim)
-        self.conv5 = nn.Conv2d(dim, dim, kernel_size=5, padding=2, groups=dim)
-        self.conv7 = nn.Conv2d(dim, dim, kernel_size=7, padding=3, groups=dim)
-        self.proj  = nn.Linear(dim * 3, dim)
-        self.act   = nn.GELU()
-    def forward(self, tokens: torch.Tensor, N: int) -> torch.Tensor:
-        D = tokens.shape[1]                               # tokens: (N*N, D)
-        img = tokens.transpose(0, 1).reshape(1, D, N, N) # (1,D,N,N)
-        y3 = self.conv3(img); y5 = self.conv5(img); y7 = self.conv7(img)
-        y  = torch.cat([y3, y5, y7], dim=1)              # (1,3D,N,N)
-        y  = y.permute(0, 2, 3, 1).reshape(1, N*N, 3*D)  # (1,N^2,3D)
-        y  = self.proj(y)                                # (1,N^2,D)
-        return self.act(y.squeeze(0))                    # (N^2,D)
-
-class TransNILPool(nn.Module):
-    """2-D TransMIL-style pooling with optional PPEG."""
-    def __init__(self, dim, heads=4, depth=2, ff_mult=4, dropout=0.1, use_ppeg=True):
-        super().__init__()
-        self.use_ppeg = use_ppeg
-        self.cls_token = nn.Parameter(torch.zeros(1, 1, dim))
-        nn.init.trunc_normal_(self.cls_token, std=0.02)
-        enc_layer = nn.TransformerEncoderLayer(
-            d_model=dim, nhead=heads, dim_feedforward=ff_mult * dim,
-            dropout=dropout, activation="gelu", batch_first=True, norm_first=True,
-        )
-        self.encoder = nn.TransformerEncoder(enc_layer, num_layers=depth)
-        self.norm_out = nn.LayerNorm(dim)
-        self.ppeg = PPEG(dim) if use_ppeg else None
-    def forward(self, x: torch.Tensor) -> torch.Tensor:   # x: (inst,D)
-        n, d = x.shape
-        device = x.device
-        N = int(math.ceil(math.sqrt(max(n, 1))))
-        pad_len = N * N - n
-        if pad_len > 0:
-            x = torch.cat([x, x.new_zeros(pad_len, d)], dim=0)  # (N^2,D)
-        if self.ppeg is not None:
-            x = x + self.ppeg(x, N)                             # residual PPEG
-        x   = x.view(1, N * N, d)                               # (1,N^2,D)
-        cls = self.cls_token.expand(1, -1, -1).to(device)       # (1,1,D)
-        src = torch.cat([cls, x], dim=1)                        # (1,1+N^2,D)
-        key_padding_mask = None
-        if pad_len > 0:
-            key_padding_mask = torch.zeros((1, 1 + N * N), dtype=torch.bool, device=device)
-            key_padding_mask[0, 1 + n: 1 + N * N] = True
-        out = self.encoder(src, src_key_padding_mask=key_padding_mask)  # (1,S,D)
-        return self.norm_out(out[:, 0, :]).squeeze(0)                   # (D,)
-
-# --------------------- TransMIL-Temporal (video) -----------------------
-class TPEG(nn.Module):
-    """
-    Temporal Positional Encoding Generator (1-D):
-    depthwise Conv1d with 3/5/7 kernels over the frame sequence, then fuse.
-    """
-    def __init__(self, dim: int):
-        super().__init__()
-        self.dw3  = nn.Conv1d(dim, dim, kernel_size=3, padding=1, groups=dim)
-        self.dw5  = nn.Conv1d(dim, dim, kernel_size=5, padding=2, groups=dim)
-        self.dw7  = nn.Conv1d(dim, dim, kernel_size=7, padding=3, groups=dim)
-        self.proj = nn.Linear(3 * dim, dim)
-        self.act  = nn.GELU()
-    def forward(self, tokens: torch.Tensor) -> torch.Tensor:
-        x  = tokens.transpose(0, 1).unsqueeze(0)          # (1,D,T)
-        y3 = self.dw3(x); y5 = self.dw5(x); y7 = self.dw7(x)
-        y  = torch.cat([y3, y5, y7], dim=1)               # (1,3D,T)
-        y  = y.squeeze(0).transpose(0, 1)                 # (T,3D)
-        return self.act(self.proj(y))                     # (T,D)
-
-def _make_banded_attn_mask(seq_len: int, window: int, device, allow_cls: bool=True):
-    """
-    Additive attention mask for TransformerEncoder (float):
-      mask[i,j] = 0 (allow), -inf (block).
-    Shape: (S,S), S = 1 + seq_len (includes CLS at idx 0).
-    """
-    if window <= 0:
-        return None
-    S = 1 + seq_len
-    mask = torch.zeros((S, S), dtype=torch.float32, device=device)
-    # block content tokens outside band
-    idx = torch.arange(S, device=device)
-    ii = idx[1:].unsqueeze(1)         # (T,1)
-    jj = idx[1:].unsqueeze(0)         # (1,T)
-    outside = (jj - ii).abs() > window
-    mask[1:, 1:][outside] = float("-inf")
-    if allow_cls:
-        mask[0, :] = 0.0              # CLS attends to all
-        mask[:, 0] = 0.0              # all attend to CLS
-    mask.fill_diagonal_(0.0)          # never block self
-    return mask
-
-class TransNILTemporalPool(nn.Module):
-    """
-    TransMIL-style temporal pooler (frames as instances):
-      - residual TPEG (learned, multi-scale temporal PE)
-      - optional temporal downsampling (stride s)
-      - optional windowed attention (bandwidth 'window')
-      - [CLS] token + L× TransformerEncoder
-      - returns normalized [CLS] as pooled feature (D,)
-    """
-    def __init__(self, dim: int, heads: int = 8, depth: int = 3,
-                 ff_mult: int = 4, dropout: float = 0.1,
-                 use_tpeg: bool = True, window: int = 64, stride: int = 1):
-        super().__init__()
-        self.use_tpeg = use_tpeg
-        self.window   = int(window)
-        self.stride   = int(max(1, stride))
-
-        # Optional temporal downsampler (depthwise + pointwise)
-        if self.stride > 1:
-            self.down = nn.Sequential(
-                nn.Conv1d(dim, dim, kernel_size=3, padding=1, stride=self.stride, groups=dim),
-                nn.GELU(),
-                nn.Conv1d(dim, dim, kernel_size=1),
-            )
-        else:
-            self.down = None
-
-        self.tpeg = TPEG(dim) if use_tpeg else None
-
-        self.cls_token = nn.Parameter(torch.zeros(1, 1, dim))
-        nn.init.trunc_normal_(self.cls_token, std=0.02)
-
-        enc_layer = nn.TransformerEncoderLayer(
-            d_model=dim, nhead=heads, dim_feedforward=ff_mult * dim,
-            dropout=dropout, activation="gelu", batch_first=True, norm_first=True
-        )
-        self.encoder  = nn.TransformerEncoder(enc_layer, num_layers=depth)
-        self.norm_out = nn.LayerNorm(dim)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:  # x: (T, D)
-        device = x.device
-        if self.down is not None:
-            xd = self.down(x.transpose(0, 1).unsqueeze(0)).squeeze(0).transpose(0, 1)
-        else:
-            xd = x
-
-        if self.tpeg is not None:
-            xd = xd + self.tpeg(xd)                      # residual TPEG
-
-        Tprime = xd.size(0)
-        xs = xd.unsqueeze(0)                             # (1, T', D)
-        cls = self.cls_token.expand(1, -1, -1).to(device)  # (1,1,D)
-        src = torch.cat([cls, xs], dim=1)                # (1, 1+T', D)
-
-        attn_mask = _make_banded_attn_mask(Tprime, self.window, device, allow_cls=True)
-        out = self.encoder(src, mask=attn_mask)          # (1, 1+T', D)
-
-        return self.norm_out(out[:, 0, :]).squeeze(0)    # (D,)
 
 # ----------------------------- factory ---------------------------------
 def build_pooler(name: str, dim: int):
     """
+    Build a MIL pooler by name.
+
     Recognized names:
-      - "mean", "max", "attention", "gated", "abmil", "abmil{E}_nogate", "abmil_tpeg", "mh_gated{K}", "temporal_conv{out}_{heads}", "gru", "transf{H}"
-      - 2-D: "transmil" or "transnil" (optionally "..._noppeg")
-      - 1-D (video): "transmil1d{heads}_{layers}_w{win}_s{stride}" (aliases: transnil1d, transmil_temporal, transnil_temporal)
-        Examples:
-          "transmil1d" (defaults 8 heads, 3 layers, w64, s1)
-          "transmil1d8_3_w64_s2"
-          "transmil1d8_3" (global attention if no wNN given)
-          "transmil1d8_3_notpeg"
+      - "mean": Simple mean pooling
+      - "max": Max pooling
+      - "attention": Single-head additive attention (Ilse et al.)
+      - "gated": Single-head gated attention
+      - "abmil", "abmil{E}": ABMIL with optional embed_dim (e.g., abmil512)
+      - "mh_gated{K}": Multi-head gated attention with K heads
+      - "temporal_conv{out}h{heads}": Temporal conv + multi-head gated
+
+    Examples:
+      build_pooler("mean", 768)
+      build_pooler("abmil", 768)
+      build_pooler("abmil512", 768)
+      build_pooler("mh_gated4", 768)
+      build_pooler("temporal_conv32h4", 768)
     """
     name = name.lower()
 
-    if name == "mean":        return MeanPool()
-    if name == "max":         return MaxPool()
-    if name == "attention":   return AttentionMIL(dim)
-    if name == "gated":       return GatedAttentionMIL(dim)
+    if name == "mean":
+        return MeanPool()
+    if name == "max":
+        return MaxPool()
+    if name == "attention":
+        return AttentionMIL(dim)
+    if name == "gated":
+        return GatedAttentionMIL(dim)
 
     # ------------ ABMIL (MIL-Lab) ------------------
-    # "abmil" (gated, default dims), "abmil_nogate", "abmil512", "abmil256_nogate"
-    if name.startswith("abmil") and not name.startswith("abmil_t"):
-        gate = "nogate" not in name
+    # "abmil" (default dims), "abmil512", "abmil256" (custom embed_dim)
+    if name.startswith("abmil"):
         nums = list(map(int, re.findall(r"\d+", name)))
         embed = nums[0] if nums else 512
-        return ABMILPool(dim, embed_dim=embed, gate=gate)
-
-    # ------------ Temporal ABMIL (ABMIL + TPEG) ---
-    # "abmil_tpeg" (gated), "abmil_tpeg_nogate"
-    if name.startswith("abmil_t"):
-        gate = "nogate" not in name
-        nums = list(map(int, re.findall(r"\d+", name)))
-        embed = nums[0] if nums else 512
-        return TemporalABMILPool(dim, embed_dim=embed, gate=gate)
+        return ABMILPool(dim, embed_dim=embed)
 
     # ------------ multi-head gated -----------------
     if name.startswith("mh_gated"):
@@ -435,50 +180,23 @@ def build_pooler(name: str, dim: int):
         heads  = nums[1] if len(nums) > 1 else 4
         return TemporalConvGatedMIL(dim, out_ch=out_ch, heads=heads)
 
-    # ------------ optional extras ------------------
-    if name == "gru":         return GRUPool(dim)
-    if name.startswith("transf"):
-        h = int((re.findall(r"\d+", name) or ["4"])[0])
-        return TinyTransformerPool(dim, heads=h)
-
-    # ------------ TransMIL / TransNIL (2-D grid) ---
-    if name.startswith("transmil") and not name.startswith("transmil1d"):
-        nums = list(map(int, re.findall(r"\d+", name)))
-        heads = nums[0] if len(nums) > 0 else 4
-        depth = nums[1] if len(nums) > 1 else 2
-        use_ppeg = ("noppeg" not in name)
-        return TransNILPool(dim, heads=heads, depth=depth, use_ppeg=use_ppeg)
-    if name.startswith("transnil") and not name.startswith("transnil1d"):
-        nums = list(map(int, re.findall(r"\d+", name)))
-        heads = nums[0] if len(nums) > 0 else 4
-        depth = nums[1] if len(nums) > 1 else 2
-        use_ppeg = ("noppeg" not in name)
-        return TransNILPool(dim, heads=heads, depth=depth, use_ppeg=use_ppeg)
-
-    # ------ TransMIL-Temporal / TransNIL-Temporal ---
-    if (name.startswith("transmil1d") or name.startswith("transnil1d")
-        or name.startswith("transmil_temporal") or name.startswith("transnil_temporal")):
-        nums   = list(map(int, re.findall(r"\d+", name)))     # heads, depth, (optional) window, stride
-        heads  = nums[0] if len(nums) > 0 else 8
-        depth  = nums[1] if len(nums) > 1 else 3
-        w_match = re.search(r"w(\d+)", name)
-        s_match = re.search(r"s(\d+)", name)
-        window  = int(w_match.group(1)) if w_match else (nums[2] if len(nums) > 2 else 64)
-        stride  = int(s_match.group(1)) if s_match else (nums[3] if len(nums) > 3 else 1)
-        use_tp  = ("notpeg" not in name)
-        if not w_match and len(nums) < 3:
-            window = 0  # no explicit window → global attention
-        return TransNILTemporalPool(dim, heads=heads, depth=depth,
-                                    use_tpeg=use_tp, window=window, stride=stride)
-
-    raise ValueError(f"Unknown aggregator '{name}'")
+    raise ValueError(f"Unknown aggregator '{name}'. "
+                     f"Available: mean, max, attention, gated, abmil, abmil{{E}}, mh_gated{{K}}, temporal_conv{{out}}h{{heads}}")
 
 # --------------------------- main model --------------------------------
 class MILModel(nn.Module):
-    """CNN/ViT backbone ➜ MIL pooler ➜ regressor (no chunking)."""
+    """
+    CNN/ViT backbone ➜ MIL pooler ➜ regressor + optional classifier.
+
+    Multi-task learning: combines regression (PDFF %) with classification
+    (4-class PDFF staging) using a shared feature backbone.
+    """
     def __init__(self, cfg: CFG):
         super().__init__()
         self.cfg = cfg
+        self.use_classifier = getattr(cfg, "use_classifier", False)
+        self.num_classes = getattr(cfg, "num_classes", 4)
+
         # For Swin at non-native resolution, window_size must divide the patch grid.
         # e.g. swin_tiny 384: patch grid=24x24, need window_size=12 (not default 7).
         # Set cfg.window_size > 0 to override, otherwise use model default.
@@ -503,11 +221,37 @@ class MILModel(nn.Module):
         )
         dim = self.backbone.num_features
         self.aggregator = build_pooler(cfg.aggregator, dim)
+
+        # Regression head: predicts PDFF percentage
         self.regressor = nn.Sequential(
             nn.Linear(dim, 128), nn.GELU(), nn.Linear(128, 1)
         )
 
-    def forward(self, bag: torch.Tensor):   # bag: (T, C, H, W)
+        # Classification head: predicts PDFF stage (4 classes)
+        if self.use_classifier:
+            self.classifier = nn.Sequential(
+                nn.Linear(dim, 128),
+                nn.GELU(),
+                nn.Dropout(0.2),
+                nn.Linear(128, self.num_classes)
+            )
+
+    def forward(self, bag: torch.Tensor):
+        """
+        Args:
+            bag: (T, C, H, W) tensor of video frames
+
+        Returns:
+            If use_classifier=False: regression output (1,)
+            If use_classifier=True: tuple of (regression (1,), classification logits (num_classes,))
+        """
         feats = self.backbone(bag)          # (T, D)
         pooled = self.aggregator(feats)     # (D,)
-        return self.regressor(pooled)       # (1,)
+
+        reg_out = self.regressor(pooled)    # (1,)
+
+        if self.use_classifier:
+            cls_out = self.classifier(pooled)  # (num_classes,)
+            return reg_out, cls_out
+
+        return reg_out

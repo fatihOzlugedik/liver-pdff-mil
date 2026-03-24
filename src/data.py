@@ -262,10 +262,30 @@ class LiverPDFFDataset(Dataset):
     def __len__(self):
         return len(self.df)
 
+    def _pdff_to_class(self, pdff: float) -> int:
+        """
+        Convert PDFF percentage to class index based on thresholds.
+
+        Default thresholds (from config):
+          Class 0: Normal (< 6.4%)
+          Class 1: Mild steatosis (6.4% - 16.3%)
+          Class 2: Moderate steatosis (16.3% - 20.7%)
+          Class 3: Severe steatosis (> 20.7%)
+        """
+        thresholds = getattr(self.cfg, "cls_thresholds", [6.4, 16.3, 20.7])
+        for i, thresh in enumerate(thresholds):
+            if pdff < thresh:
+                return i
+        return len(thresholds)  # Last class
+
     def __getitem__(self, idx):
         row   = self.df.iloc[idx]
         vid   = str(row[self.cfg.video_id_col])
-        label = torch.tensor(float(row[self.cfg.target_col]), dtype=torch.float32)
+        pdff  = float(row[self.cfg.target_col])
+        label = torch.tensor(pdff, dtype=torch.float32)
+
+        # Get class label for classification head
+        cls_label = torch.tensor(self._pdff_to_class(pdff), dtype=torch.long)
 
         frames  = self._get_frames(row)
         T_total = frames.shape[0]
@@ -283,7 +303,7 @@ class LiverPDFFDataset(Dataset):
             bag.append(self.aug(pil))             # (1, H, W)
         bag = torch.stack(bag)                    # (n_frames, 1, H, W)
 
-        return bag, label, vid
+        return bag, label, cls_label, vid
 
 
 # ---------------------------------------------------------------------------
@@ -319,8 +339,8 @@ class AddSpeckleNoise:
 # ---------------------------------------------------------------------------
 
 def _collate(batch):
-    bag, y, pid = zip(*batch)
-    return bag[0], y[0], pid[0]
+    bag, y, cls_y, pid = zip(*batch)
+    return bag[0], y[0], cls_y[0], pid[0]
 
 
 def _mk_loader(ds: Dataset, shuffle: bool, cfg: CFG, sampler=None) -> DataLoader:

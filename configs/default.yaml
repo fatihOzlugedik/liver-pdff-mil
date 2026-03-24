@@ -1,0 +1,130 @@
+# ============================================================================
+# EXPERIMENT CONFIGURATION
+# ============================================================================
+# This is the ONLY file you need to edit.
+# Copy this file, modify settings, and run:
+#
+#   python main.py configs/your_config.yaml
+#
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# DATA PATHS
+# ----------------------------------------------------------------------------
+video_folder: "/research/projects/Sahika/projects/liver_PDFF/data/EUS_videos_v5_feb26"
+csv_path: "/research/projects/Sahika/projects/liver_PDFF/data/dataset_v5_5fold_feb26_trainval_only.csv"
+cache_dir: "/research/projects/Sahika/projects/liver_PDFF/data/frame_cache_384"
+
+# Column names in CSV
+video_id_col: "video"
+video_path_col: "video_path"
+target_col: "PDFF"
+start_col: "start_time_1"
+end_col: "end_time_1"
+stratify_col: "stage"
+
+# Frame settings
+img_size: 384
+n_frames: 175
+
+# ----------------------------------------------------------------------------
+# MODEL
+# ----------------------------------------------------------------------------
+backbone: "swin_tiny_patch4_window7_224.ms_in1k"
+window_size: 0  # 0 = auto-calculate
+
+# Aggregator options:
+#   - "mean"           : Simple mean pooling
+#   - "max"            : Max pooling
+#   - "attention"      : Single-head attention
+#   - "gated"          : Single-head gated attention
+#   - "abmil"          : Attention-based MIL (recommended)
+#   - "mh_gated4"      : Multi-head gated (4 heads)
+#   - "mh_gated8"      : Multi-head gated (8 heads)
+#   - "temporal_conv32h4" : Temporal conv + gated attention
+aggregator: "abmil"
+
+# ----------------------------------------------------------------------------
+# CLASSIFICATION HEAD (Multi-task Learning)
+# ----------------------------------------------------------------------------
+# Set use_classifier to false for regression only
+use_classifier: true
+
+# Weight balance: cls_weight + reg_weight = 1.0
+# cls_weight: 0.3 means 30% classification, 70% regression
+cls_weight: 0.3
+
+# Number of PDFF categories
+num_classes: 4
+
+# Thresholds for classification (% PDFF)
+#   Class 0: Normal       (< 6.4%)
+#   Class 1: Mild         (6.4% - 16.3%)
+#   Class 2: Moderate     (16.3% - 20.7%)
+#   Class 3: Severe       (> 20.7%)
+cls_thresholds: [6.4, 16.3, 20.7]
+
+# ----------------------------------------------------------------------------
+# LOSS FUNCTION
+# ----------------------------------------------------------------------------
+# Option 1: Specify loss function directly
+# loss_fn options:
+#   - "l1"              : MAE (default, robust)
+#   - "l2" / "mse"      : MSE
+#   - "huber"           : Huber loss (set delta in loss_config)
+#   - "logcosh"         : Log-cosh loss
+#   - "wing"            : Wing loss
+#   - "focal"           : Focal loss (set gamma in loss_config)
+#   - "weighted_zone"   : Zone-weighted loss
+#   - "threshold_aware" : Threshold-aware loss
+#   - "combined"        : Combine multiple losses
+
+loss_fn: "l1"
+loss_config: {}
+
+# Examples with config:
+# loss_fn: "huber"
+# loss_config:
+#   delta: 2.0
+
+# loss_fn: "focal"
+# loss_config:
+#   gamma: 2.0
+#   base_loss: "l1"
+
+# Option 2: Use a preset (overrides loss_fn)
+# loss_preset options: "default", "robust", "clinical", "focal_l1", "zone_weighted"
+# loss_preset: "clinical"
+
+# ----------------------------------------------------------------------------
+# TRAINING
+# ----------------------------------------------------------------------------
+epochs: 100
+batch_size: 1
+grad_accum: 8      # Effective batch size = batch_size * grad_accum
+lr: 0.0001         # Learning rate
+wd: 0.0001         # Weight decay
+workers: 2         # DataLoader workers
+seed: 42           # Random seed
+
+# Binary threshold for evaluation metrics
+threshold: 5.0
+
+# Balance classes during training
+use_weighted_sampler: true
+
+# ----------------------------------------------------------------------------
+# CROSS-VALIDATION
+# ----------------------------------------------------------------------------
+# Set n_folds to 0 for single run (uses set_col)
+n_folds: 5
+fold_set_prefix: "set"   # Columns: set1, set2, set3, ...
+set_col: "set1"          # Used when n_folds = 0
+
+# ----------------------------------------------------------------------------
+# OUTPUT
+# ----------------------------------------------------------------------------
+output_dir: "/research/projects/Sahika/projects/liver_PDFF/runs"
+
+# Run name (auto-generated if empty)
+run_name: ""
