@@ -1,15 +1,19 @@
 # Liver PDFF MIL
 
-Multiple Instance Learning (MIL) for PDFF (Proton Density Fat Fraction) regression from ultrasound videos.
+Multiple Instance Learning (MIL) for PDFF (Proton Density Fat Fraction) regression from ultrasound videos. Supports multi-task learning with a joint regression + classification head, multiple loss functions, and YAML-driven configuration.
+
+---
 
 ## Quick Start
 
 ```bash
-# 1. Copy and edit config
+# 1. Copy the template and fill in your data paths
 cp configs/default.yaml configs/my_experiment.yaml
+
+# 2. Edit paths and settings
 nano configs/my_experiment.yaml
 
-# 2. Run
+# 3. Run
 python src/main.py configs/my_experiment.yaml
 ```
 
@@ -19,20 +23,20 @@ python src/main.py configs/my_experiment.yaml
 
 ```
 liver-pdff-mil/
-├── configs/                 # ← EDIT THESE YAML FILES
-│   ├── default.yaml         # Full template (start here)
-│   ├── abmil_huber.yaml
-│   ├── mean_focal.yaml
-│   └── ...
+├── configs/                 # ← ONLY EDIT THESE
+│   ├── default.yaml         # Full template with all options documented
+│   ├── ablation/            # 64 pre-made configs (8 aggregators × 8 losses)
+│   └── *.yaml               # Example configs
 │
-├── src/                     # Source code (don't edit)
+├── src/                     # Source code (do not edit)
 │   ├── main.py              # Entry point
-│   ├── model.py             # MIL model architecture
-│   ├── engine.py            # Training loop
+│   ├── model.py             # MIL model + pooling strategies
+│   ├── engine.py            # Training/validation loop
 │   ├── losses.py            # Loss functions
-│   ├── data.py              # Data loading
-│   └── config.py            # Config loader (internal)
+│   ├── data.py              # Dataset and data loading
+│   └── config.py            # YAML loader (internal)
 │
+├── run_ablation.sh          # Multi-GPU scheduler for ablation studies
 └── README.md
 ```
 
@@ -40,33 +44,37 @@ liver-pdff-mil/
 
 ## Configuration
 
-All settings are controlled through YAML files. Copy `configs/default.yaml` and modify as needed.
+All settings live in a single YAML file. Copy `configs/default.yaml` and modify — **you never need to edit any `.py` file**.
 
-### Key Settings
+```bash
+python src/main.py configs/your_config.yaml
+```
+
+### Minimal config
 
 ```yaml
-# === MODEL ===
-aggregator: "abmil"          # MIL pooling method
-backbone: "swin_tiny_patch4_window7_224.ms_in1k"
+# Data
+video_folder: "/path/to/videos"
+csv_path: "/path/to/dataset.csv"
+cache_dir: "/path/to/frame_cache"
+output_dir: "/path/to/runs"
 
-# === LOSS ===
-loss_fn: "l1"                # Loss function
-loss_config: {}              # Loss parameters
+# Model
+aggregator: "abmil"
 
-# === MULTI-TASK ===
-use_classifier: true         # Enable classification head
-cls_weight: 0.3              # Classification weight (0-1)
+# Loss
+loss_fn: "l1"
 
-# === TRAINING ===
+# Training
 epochs: 100
-n_folds: 5                   # Cross-validation folds
+n_folds: 5
 ```
 
 ---
 
-## Available Options
+## Aggregators (MIL Pooling)
 
-### Aggregators (MIL Pooling)
+Set with `aggregator:` in the config.
 
 | Name | Description |
 |------|-------------|
@@ -74,88 +82,50 @@ n_folds: 5                   # Cross-validation folds
 | `max` | Max pooling |
 | `attention` | Single-head additive attention |
 | `gated` | Single-head gated attention |
-| `abmil` | Attention-based MIL (recommended) |
-| `mh_gated4` | Multi-head gated (4 heads) |
-| `mh_gated8` | Multi-head gated (8 heads) |
+| `abmil` | Attention-based MIL — recommended default |
+| `mh_gated4` | Multi-head gated attention (4 heads) |
+| `mh_gated8` | Multi-head gated attention (8 heads) |
 | `temporal_conv32h4` | Temporal conv + gated attention |
-
-### Loss Functions
-
-| Name | Description | Config |
-|------|-------------|--------|
-| `l1` | MAE (default) | - |
-| `l2` / `mse` | MSE | - |
-| `huber` | Huber loss | `delta: 2.0` |
-| `logcosh` | Log-cosh | - |
-| `wing` | Wing loss | `w: 5.0, epsilon: 2.0` |
-| `focal` | Focal regression | `gamma: 2.0, base_loss: "l1"` |
-| `weighted_zone` | Zone-weighted | `base_loss: "l1"` |
-| `threshold_aware` | Clinical thresholds | `thresholds: [5.0], crossing_penalty: 1.0` |
-| `combined` | Multiple losses | See examples below |
-
-### Loss Presets
-
-Instead of configuring manually, use presets:
-
-```yaml
-loss_preset: "clinical"   # Threshold-aware at clinical cutoffs
-# loss_preset: "robust"   # Huber with delta=2.0
-# loss_preset: "focal_l1" # Focal with gamma=2.0
-```
 
 ---
 
-## Examples
+## Loss Functions
 
-### Basic Training
+Set with `loss_fn:` and optional `loss_config:` in the config.
 
-```yaml
-# configs/basic.yaml
-aggregator: "abmil"
-loss_fn: "l1"
-use_classifier: true
-cls_weight: 0.3
-epochs: 100
-n_folds: 5
-```
+| Name | Description | Key config params |
+|------|-------------|-------------------|
+| `l1` | MAE — robust default | — |
+| `l2` / `mse` | MSE | — |
+| `huber` | Huber — good middle ground | `delta: 2.0` |
+| `logcosh` | Smooth, outlier-tolerant | — |
+| `wing` | Wing loss — face/landmark style | `w: 5.0, epsilon: 2.0` |
+| `focal` | Focus on hard examples | `gamma: 2.0, base_loss: "l1"` |
+| `weighted_zone` | Higher penalty in clinical zones | `base_loss: "l1"` |
+| `threshold_aware` | Penalty for crossing PDFF thresholds | `thresholds: [5.0], crossing_penalty: 1.0` |
+| `combined` | Weighted sum of multiple losses | see example below |
 
-```bash
-python src/main.py configs/basic.yaml
-```
-
-### Huber Loss
+### Examples
 
 ```yaml
-# configs/huber.yaml
-aggregator: "abmil"
+# Huber
 loss_fn: "huber"
 loss_config:
   delta: 2.0
-```
 
-### Focal Loss (Hard Examples)
-
-```yaml
-# configs/focal.yaml
-aggregator: "abmil"
+# Focal
 loss_fn: "focal"
 loss_config:
   gamma: 2.0
   base_loss: "l1"
-```
 
-### Clinical Loss (Threshold-Aware)
+# Threshold-aware (penalizes crossing clinical cutoffs)
+loss_fn: "threshold_aware"
+loss_config:
+  thresholds: [6.4, 16.3, 20.7]
+  crossing_penalty: 2.0
 
-```yaml
-# configs/clinical.yaml
-aggregator: "abmil"
-loss_preset: "clinical"
-```
-
-### Combined Loss
-
-```yaml
-# configs/combined.yaml
+# Combined
 loss_fn: "combined"
 loss_config:
   losses:
@@ -167,220 +137,123 @@ loss_config:
       delta: 2.0
 ```
 
-### Regression Only (No Classification)
+### Presets
+
+Presets are named bundles of `loss_fn` + `loss_config`. They override `loss_fn` when set.
 
 ```yaml
-# configs/regression_only.yaml
-aggregator: "abmil"
-use_classifier: false
-loss_fn: "l1"
-```
-
-### Heavy Classification Weight
-
-```yaml
-# configs/cls_heavy.yaml
-aggregator: "abmil"
-use_classifier: true
-cls_weight: 0.7    # 70% classification, 30% regression
+loss_preset: "clinical"      # Threshold-aware at PDFF clinical cutoffs
+# loss_preset: "robust"      # Huber delta=2.0
+# loss_preset: "focal_l1"    # Focal gamma=2.0 with L1 base
+# loss_preset: "zone_weighted"
 ```
 
 ---
 
-## Running Loss Function Ablations
+## Classification Head (Multi-task)
 
-To compare different loss functions, create multiple config files and run them.
+The model can simultaneously predict PDFF value (regression) and PDFF stage (classification). Classification targets are derived automatically from the regression target using configurable thresholds.
 
-### Method 1: Manual Configs
+### PDFF Staging (default thresholds)
 
-```bash
-# Create configs for each loss
-cp configs/default.yaml configs/ablation_l1.yaml
-cp configs/default.yaml configs/ablation_huber.yaml
-cp configs/default.yaml configs/ablation_focal.yaml
-
-# Edit each config with different loss settings, then run:
-python src/main.py configs/ablation_l1.yaml
-python src/main.py configs/ablation_huber.yaml
-python src/main.py configs/ablation_focal.yaml
-```
-
-### Method 2: Shell Script
-
-Create `run_ablation.sh`:
-
-```bash
-#!/bin/bash
-# Loss function ablation study
-
-LOSSES=("l1" "huber" "focal" "logcosh")
-
-for loss in "${LOSSES[@]}"; do
-    echo "========================================"
-    echo "Running: $loss"
-    echo "========================================"
-
-    # Create temp config
-    cat > /tmp/ablation_${loss}.yaml << EOF
-video_folder: "/path/to/videos"
-csv_path: "/path/to/data.csv"
-cache_dir: "/path/to/cache"
-output_dir: "/path/to/runs"
-
-aggregator: "abmil"
-img_size: 384
-n_frames: 175
-
-use_classifier: true
-cls_weight: 0.3
-
-loss_fn: "${loss}"
-loss_config: {}
-
-epochs: 100
-n_folds: 5
-seed: 42
-EOF
-
-    python src/main.py /tmp/ablation_${loss}.yaml
-done
-
-echo "Ablation complete!"
-```
-
-Run:
-```bash
-chmod +x run_ablation.sh
-./run_ablation.sh
-```
-
-### Method 3: Python Script
-
-Create `run_ablation.py`:
-
-```python
-#!/usr/bin/env python3
-import subprocess
-import yaml
-
-# Base configuration
-BASE = {
-    "video_folder": "/path/to/videos",
-    "csv_path": "/path/to/data.csv",
-    "cache_dir": "/path/to/cache",
-    "output_dir": "/path/to/runs",
-    "aggregator": "abmil",
-    "img_size": 384,
-    "n_frames": 175,
-    "use_classifier": True,
-    "cls_weight": 0.3,
-    "epochs": 100,
-    "n_folds": 5,
-    "seed": 42,
-}
-
-# Loss configurations to compare
-ABLATIONS = {
-    "l1": {"loss_fn": "l1"},
-    "l2": {"loss_fn": "l2"},
-    "huber_1": {"loss_fn": "huber", "loss_config": {"delta": 1.0}},
-    "huber_2": {"loss_fn": "huber", "loss_config": {"delta": 2.0}},
-    "huber_5": {"loss_fn": "huber", "loss_config": {"delta": 5.0}},
-    "focal_1": {"loss_fn": "focal", "loss_config": {"gamma": 1.0, "base_loss": "l1"}},
-    "focal_2": {"loss_fn": "focal", "loss_config": {"gamma": 2.0, "base_loss": "l1"}},
-    "logcosh": {"loss_fn": "logcosh"},
-    "clinical": {"loss_preset": "clinical"},
-    "zone_weighted": {"loss_preset": "zone_weighted"},
-}
-
-# Run each configuration
-for name, settings in ABLATIONS.items():
-    print(f"\n{'='*50}")
-    print(f"Running: {name}")
-    print(f"{'='*50}\n")
-
-    # Merge base config with ablation settings
-    cfg = {**BASE, **settings, "run_name": f"ablation_{name}"}
-
-    # Save temporary config
-    cfg_path = f"/tmp/ablation_{name}.yaml"
-    with open(cfg_path, "w") as f:
-        yaml.dump(cfg, f)
-
-    # Run experiment
-    subprocess.run(["python", "src/main.py", cfg_path])
-
-print("\nAblation study complete!")
-```
-
-Run:
-```bash
-python run_ablation.py
-```
-
----
-
-## Classification Head
-
-The model supports multi-task learning with both regression and classification.
-
-### PDFF Stages (4 Classes)
-
-| Class | Stage | PDFF Range |
-|-------|-------|------------|
+| Class | Stage | PDFF |
+|-------|-------|------|
 | 0 | Normal | < 6.4% |
-| 1 | Mild steatosis | 6.4% - 16.3% |
-| 2 | Moderate steatosis | 16.3% - 20.7% |
+| 1 | Mild steatosis | 6.4% – 16.3% |
+| 2 | Moderate steatosis | 16.3% – 20.7% |
 | 3 | Severe steatosis | > 20.7% |
 
-### Adjusting Loss Balance
+### Config
 
 ```yaml
-# More regression focus (default)
-cls_weight: 0.3   # 30% cls, 70% reg
+use_classifier: true         # Enable classification head
+cls_weight: 0.3              # Weight on classification loss (regression = 1 - cls_weight)
+num_classes: 4
+cls_thresholds: [6.4, 16.3, 20.7]
+```
 
-# Balanced
-cls_weight: 0.5   # 50% cls, 50% reg
+`cls_weight` ranges from 0 (regression only) to 1 (classification only). Use `use_classifier: false` to disable the head entirely.
 
-# More classification focus
-cls_weight: 0.7   # 70% cls, 30% reg
+---
 
-# Regression only
-use_classifier: false
+## Cross-Validation
+
+5-fold CV is the default. Fold assignments must be in the CSV as columns named `set1`, `set2`, ..., `set5`.
+
+```yaml
+n_folds: 5
+fold_set_prefix: "set"    # Reads columns: set1, set2, ..., set5
+```
+
+To run a single split instead:
+
+```yaml
+n_folds: 0
+set_col: "set1"           # Column containing train/val/test labels
 ```
 
 ---
 
-## Output Structure
+## Output
 
-Each experiment creates:
+Each run creates a directory under `output_dir/`:
 
 ```
-runs/abmil_s384_f175_cls30_CV5/
-├── config.json              # Saved configuration
-├── train_log.csv            # Training metrics
-├── train_log.txt            # Training log
-├── train_log.png            # Loss curves
+runs/abmil_focal_cls30_CV5/
+├── config.json              # Saved config snapshot
+├── train_log.csv            # Per-epoch metrics
+├── train_log.txt            # Full training log
+├── train_log.png            # Loss/metric curves
 ├── best.pt                  # Best model checkpoint
-├── fold00/                  # Per-fold results
+├── fold00/
 │   ├── val_predictions.csv
 │   ├── test_predictions.csv
 │   ├── val_summary.png
 │   └── test_summary.png
 ├── fold01/
-├── fold02/
 └── ...
 ```
 
 ---
 
-## Cache Generation
+## Ablation Study (8 × 8 = 64 experiments)
 
-Pre-compute frame cache for faster training:
+Pre-made configs covering all combinations of aggregators and losses are in `configs/ablation/`. Each is configured with `use_classifier=true`, `cls_weight=0.3`, and `n_folds=5`.
+
+### Run on a single GPU
+
+```bash
+python src/main.py configs/ablation/abmil_focal.yaml
+```
+
+### Run all 64 experiments across 4 GPUs
+
+```bash
+chmod +x run_ablation.sh
+./run_ablation.sh
+```
+
+The scheduler polls every 60 seconds and launches new jobs as GPUs become free. Logs go to `logs/ablation/<config_name>.log`.
+
+Config naming convention: `<aggregator>_<loss>.yaml`
+
+```
+mean_l1.yaml, mean_l2.yaml, mean_huber.yaml, ...
+abmil_l1.yaml, abmil_focal.yaml, abmil_threshold_aware.yaml, ...
+temporal_conv32h4_wing.yaml, ...
+```
+
+---
+
+## Frame Cache
+
+Pre-compute and cache decoded frames for faster training:
 
 ```bash
 python src/precompute_cache.py --img_size 384
 ```
+
+Set `cache_dir` in your config to point to the output directory.
 
 ---
 
@@ -396,16 +269,15 @@ scikit-learn
 pyyaml
 tqdm
 matplotlib
-decord  # optional, faster video loading
+decord         # optional — faster video decoding
 ```
 
 ---
 
 ## Tips
 
-1. **Start with defaults**: Copy `configs/default.yaml` as your template
-2. **Use presets**: `loss_preset: "clinical"` is often effective
-3. **Ablation order**: Start with `l1`, then try `huber`, `focal`, `clinical`
-4. **Classification weight**: 0.3 is a good starting point
-5. **Check logs**: Look at `train_log.txt` for training progress
-6. **Compare results**: Check `val_predictions.csv` for detailed analysis
+- **Start here**: `configs/default.yaml` has every option documented inline
+- **Aggregator**: `abmil` is a strong default; try `temporal_conv32h4` if temporal ordering matters
+- **Loss**: Start with `l1`, then try `huber` or `threshold_aware` for clinical tasks
+- **Classification weight**: 0.3 works well; increase if staging accuracy is the primary metric
+- **Check logs**: `tail -f logs/ablation/<run>.log` to monitor ablation jobs
